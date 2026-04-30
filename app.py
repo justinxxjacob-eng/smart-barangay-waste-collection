@@ -9,6 +9,7 @@ import sqlite3
 import hashlib
 import os
 import random
+import re
 import math
 from datetime import datetime, timedelta
 from functools import wraps
@@ -28,6 +29,80 @@ def get_db():
 
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
+
+# ─────────────────────────────────────────────
+# INPUT VALIDATION HELPERS
+# ─────────────────────────────────────────────
+
+def is_valid_name(name):
+    """Name must have at least 2 real words with letters, no pure gibberish."""
+    if not name or len(name.strip()) < 3:
+        return False
+    # Must contain at least 2 letters, allow spaces, hyphens, dots
+    if not re.search(r'[a-zA-Z]{2,}', name):
+        return False
+    # Reject if too many consecutive non-letter characters
+    if re.search(r'[^a-zA-Z\s\-\.]{3,}', name):
+        return False
+    # Reject obvious random strings: high ratio of mixed case random chars
+    stripped = re.sub(r'[\s\-\.]', '', name)
+    if len(stripped) > 4:
+        # Count consonant clusters (sign of gibberish)
+        consonant_cluster = re.findall(r'[bcdfghjklmnpqrstvwxyzBCDFGHJKLMNPQRSTVWXYZ]{5,}', stripped)
+        if consonant_cluster:
+            return False
+    return True
+
+def is_valid_email(email):
+    """Basic but strict email validation."""
+    if not email:
+        return False
+    pattern = r'^[a-zA-Z0-9][a-zA-Z0-9._%+\-]{0,63}@[a-zA-Z0-9\-]+\.[a-zA-Z]{2,}$'
+    if not re.match(pattern, email):
+        return False
+    # Reject random-looking local parts (long string of mixed chars)
+    local = email.split('@')[0]
+    if len(local) > 30:
+        return False
+    # Reject if local part looks like random gibberish
+    if re.search(r'[bcdfghjklmnpqrstvwxyz]{6,}', local.lower()):
+        return False
+    return True
+
+def is_valid_password(password):
+    """Password must be 6+ chars and not be pure gibberish numbers/letters."""
+    if not password or len(password) < 6:
+        return False
+    return True
+
+def is_valid_contact(contact):
+    """Philippine mobile number format or empty."""
+    if not contact:
+        return True  # optional field
+    cleaned = re.sub(r'[\s\-]', '', contact)
+    return bool(re.match(r'^(09|\+639)\d{9}$', cleaned))
+
+def get_validation_errors_register(name, email, password, contact):
+    errors = []
+    if not name or len(name.strip()) < 2:
+        errors.append("Full name is required.")
+    elif not is_valid_name(name):
+        errors.append("Please enter a valid full name (e.g., Juan dela Cruz).")
+    
+    if not email:
+        errors.append("Email address is required.")
+    elif not is_valid_email(email):
+        errors.append("Please enter a valid email address.")
+    
+    if not password:
+        errors.append("Password is required.")
+    elif not is_valid_password(password):
+        errors.append("Password must be at least 6 characters long.")
+    
+    if contact and not is_valid_contact(contact):
+        errors.append("Contact number must be a valid Philippine mobile number (e.g., 09XXXXXXXXX).")
+    
+    return errors
 
 # ─────────────────────────────────────────────
 # VOLUME ESTIMATION HELPER
@@ -189,6 +264,19 @@ def init_db():
                         ('Maria Santos','resident@barangay.gov',hash_password('resident123'),'resident','09221234567')).lastrowid
         c.execute("INSERT INTO households (user_id,address,barangay_zone,latitude,longitude) VALUES (?,?,?,?,?)",
                   (uid,'123 Rizal St, Zone 1','Zone 1 - Poblacion',7.0707,125.6087))
+
+        # Seed a few more residents per zone for demo
+        demo_residents = [
+            ('Pedro Reyes','pedro@email.com','Zone 2 - Riverside','456 Mabini St'),
+            ('Ana Flores','ana@email.com','Zone 3 - Hillside','789 Aguinaldo Ave'),
+            ('Carlos Bautista','carlos@email.com','Zone 1 - Poblacion','12 Bonifacio St'),
+            ('Lita Gomez','lita@email.com','Zone 4 - East Block','34 Rizal Ext'),
+        ]
+        for name, email, zone, addr in demo_residents:
+            uid2 = c.execute("INSERT INTO users (name,email,password,role,contact_number) VALUES (?,?,?,?,?)",
+                             (name, email, hash_password('resident123'), 'resident', '09221234567')).lastrowid
+            c.execute("INSERT INTO households (user_id,address,barangay_zone,latitude,longitude) VALUES (?,?,?,?,?)",
+                      (uid2, addr, zone, 7.0707+random.uniform(-0.01,0.01), 125.6087+random.uniform(-0.01,0.01)))
 
     # Seed schedules
     c.execute("SELECT COUNT(*) FROM collection_schedules")
@@ -355,18 +443,27 @@ def login():
     if request.method == 'POST':
         email = request.form.get('email','').strip()
         password = request.form.get('password','')
-        conn = get_db()
-        user = conn.execute("SELECT * FROM users WHERE email=? AND password=?", (email, hash_password(password))).fetchone()
-        conn.close()
-        if user:
-            session.clear()
-            session['user_id'] = user['user_id']
-            session['name'] = user['name']
-            session['role'] = user['role']
-            session['email'] = user['email']
-            return redirect(url_for('dashboard'))
+
+        # Validate inputs before hitting the DB
+        if not email or not password:
+            error = 'Please enter both email and password.'
+        elif not is_valid_email(email):
+            error = 'Invalid email format. Please enter a valid email address.'
+        elif len(password) < 6:
+            error = 'Password must be at least 6 characters.'
         else:
-            error = 'Invalid email or password.'
+            conn = get_db()
+            user = conn.execute("SELECT * FROM users WHERE email=? AND password=?", (email, hash_password(password))).fetchone()
+            conn.close()
+            if user:
+                session.clear()
+                session['user_id'] = user['user_id']
+                session['name'] = user['name']
+                session['role'] = user['role']
+                session['email'] = user['email']
+                return redirect(url_for('dashboard'))
+            else:
+                error = 'No account found with those credentials. Please check your email and password.'
     return render_template_string(LOGIN_HTML, error=error)
 
 @app.route('/logout')
@@ -376,18 +473,21 @@ def logout():
 
 @app.route('/register', methods=['GET','POST'])
 def register():
-    error = None
+    errors = []
     success = None
+    form_data = {}
     if request.method == 'POST':
-        name = request.form.get('name','').strip()
-        email = request.form.get('email','').strip()
-        password = request.form.get('password','')
+        name    = request.form.get('name','').strip()
+        email   = request.form.get('email','').strip()
+        password= request.form.get('password','')
         contact = request.form.get('contact','').strip()
         address = request.form.get('address','').strip()
-        zone = request.form.get('zone','').strip()
-        if not all([name, email, password]):
-            error = 'Name, email, and password are required.'
-        else:
+        zone    = request.form.get('zone','').strip()
+        form_data = {'name':name,'email':email,'contact':contact,'address':address,'zone':zone}
+
+        errors = get_validation_errors_register(name, email, password, contact)
+
+        if not errors:
             conn = get_db()
             try:
                 uid = conn.execute("INSERT INTO users (name,email,password,role,contact_number) VALUES (?,?,?,?,?)",
@@ -396,15 +496,20 @@ def register():
                              (uid, address, zone, 7.0707+random.uniform(-0.01,0.01), 125.6087+random.uniform(-0.01,0.01)))
                 conn.commit()
                 conn.close()
-                return render_template_string(REGISTER_HTML, error=None, success='Registration successful! Please login.', zones=[])
+                conn2 = get_db()
+                zones_list = conn2.execute("SELECT zone_name FROM zones").fetchall()
+                conn2.close()
+                return render_template_string(REGISTER_HTML, errors=[], success='Registration successful! Please login.', zones=zones_list, form_data={})
             except sqlite3.IntegrityError:
-                error = 'Email already registered.'
+                errors.append('That email address is already registered. Please use a different email or login.')
             finally:
-                conn.close()
+                try: conn.close()
+                except: pass
+
     conn = get_db()
     zones = conn.execute("SELECT zone_name FROM zones").fetchall()
     conn.close()
-    return render_template_string(REGISTER_HTML, error=error, success=success, zones=zones)
+    return render_template_string(REGISTER_HTML, errors=errors, success=success, zones=zones, form_data=form_data)
 
 @app.route('/dashboard')
 @login_required
@@ -436,8 +541,35 @@ def admin_dashboard():
         vol = conn.execute("SELECT SUM(waste_volume) FROM waste_data WHERE date=?", (d,)).fetchone()[0] or 0
         td.append({'date':d,'volume':round(vol,1)})
     zp = conn.execute("SELECT z.zone_name, SUM(CASE WHEN cl.status='collected' THEN 1 ELSE 0 END) as collected, SUM(CASE WHEN cl.status='missed' THEN 1 ELSE 0 END) as missed, SUM(CASE WHEN cl.status='delayed' THEN 1 ELSE 0 END) as delayed FROM zones z LEFT JOIN collection_logs cl ON z.zone_id=cl.zone_id GROUP BY z.zone_id").fetchall()
+
+    # Per-resident collection status per zone
+    zone_residents = []
+    for z in zones:
+        residents = conn.execute("""
+            SELECT u.user_id, u.name, u.contact_number, h.address,
+                   cl.status as last_status, cl.collected_at as last_collected
+            FROM users u
+            JOIN households h ON u.user_id = h.user_id
+            LEFT JOIN (
+                SELECT zone_id, collector_id, status, collected_at,
+                       ROW_NUMBER() OVER (PARTITION BY zone_id ORDER BY collected_at DESC) as rn
+                FROM collection_logs
+            ) cl ON cl.zone_id = ? AND cl.rn = 1
+            WHERE u.role = 'resident' AND h.barangay_zone = ?
+        """, (z['zone_id'], z['zone_name'])).fetchall()
+        if residents:
+            zone_residents.append({
+                'zone_name': z['zone_name'],
+                'zone_id': z['zone_id'],
+                'residents': [dict(r) for r in residents]
+            })
+
     conn.close()
-    return render_template_string(ADMIN_HTML, total_households=th, total_users=tu, today_schedules=ts, collected=col, missed=mis, delayed=de, pct=pct, high_risk=hr, zones=zones, open_reports=ore, trend_data=td, zone_perf=[dict(r) for r in zp], today=today)
+    return render_template_string(ADMIN_HTML, total_households=th, total_users=tu, today_schedules=ts,
+                                  collected=col, missed=mis, delayed=de, pct=pct, high_risk=hr,
+                                  zones=zones, open_reports=ore, trend_data=td,
+                                  zone_perf=[dict(r) for r in zp], today=today,
+                                  zone_residents=zone_residents)
 
 @app.route('/admin/zones', methods=['GET','POST'])
 @login_required
@@ -540,12 +672,26 @@ def collector_dashboard():
     conn = get_db()
     today = datetime.now().strftime('%A')
     cid = session['user_id']
-    assigned = conn.execute("SELECT cs.*, z.zone_name, z.description FROM collection_schedules cs JOIN zones z ON cs.zone_id=z.zone_id WHERE cs.collection_day=? AND cs.status='active'", (today,)).fetchall()
+    assigned = conn.execute("SELECT cs.*, z.zone_name, z.description, z.zone_id FROM collection_schedules cs JOIN zones z ON cs.zone_id=z.zone_id WHERE cs.collection_day=? AND cs.status='active'", (today,)).fetchall()
     all_zones = conn.execute("SELECT * FROM zones").fetchall()
     rl = conn.execute("SELECT cl.*, z.zone_name FROM collection_logs cl JOIN zones z ON cl.zone_id=z.zone_id WHERE cl.collector_id=? ORDER BY cl.collected_at DESC LIMIT 20", (cid,)).fetchall()
     st = conn.execute("SELECT status, COUNT(*) as cnt FROM collection_logs WHERE collector_id=? AND date(collected_at)=date('now') GROUP BY status", (cid,)).fetchall()
+
+    # Get predictions for assigned zones today
+    zone_predictions = {}
+    for a in assigned:
+        preds = conn.execute("""
+            SELECT predicted_date, waste_level, confidence_score
+            FROM predictions
+            WHERE zone_id=? AND predicted_date >= date('now')
+            ORDER BY predicted_date LIMIT 7
+        """, (a['zone_id'],)).fetchall()
+        zone_predictions[a['zone_id']] = [dict(p) for p in preds]
+
     conn.close()
-    return render_template_string(COLLECTOR_HTML, assigned=assigned, all_zones=all_zones, recent_logs=rl, stats=st, today=today)
+    return render_template_string(COLLECTOR_HTML, assigned=assigned, all_zones=all_zones,
+                                  recent_logs=rl, stats=st, today=today,
+                                  zone_predictions=zone_predictions)
 
 @app.route('/collector/log', methods=['POST'])
 @login_required
@@ -580,14 +726,22 @@ def resident_dashboard():
         zone = conn.execute("SELECT * FROM zones WHERE zone_name=?", (hh['barangay_zone'],)).fetchone()
         zid = zone['zone_id'] if zone else 1
         schedule = conn.execute("SELECT * FROM collection_schedules WHERE zone_id=? AND status='active'", (zid,)).fetchall()
-        prediction = conn.execute("SELECT * FROM predictions WHERE zone_id=? AND predicted_date >= date('now') ORDER BY predicted_date LIMIT 7", (zid,)).fetchall()
+        # Recent collection logs for this zone (last 7)
+        recent_collections = conn.execute("""
+            SELECT cl.status, cl.collected_at, cl.remarks, cl.bin_count, cl.bin_type, cl.fill_level
+            FROM collection_logs cl
+            WHERE cl.zone_id=?
+            ORDER BY cl.collected_at DESC LIMIT 7
+        """, (zid,)).fetchall()
         ll = conn.execute("SELECT * FROM collection_logs WHERE zone_id=? ORDER BY collected_at DESC LIMIT 1", (zid,)).fetchone()
     else:
-        schedule, prediction, ll, zid = [], [], None, 1
+        schedule, recent_collections, ll, zid = [], [], None, 1
     notifs = conn.execute("SELECT * FROM notifications WHERE user_id=? ORDER BY sent_at DESC LIMIT 10", (uid,)).fetchall()
     mr = conn.execute("SELECT * FROM reports WHERE user_id=? ORDER BY created_at DESC", (uid,)).fetchall()
     conn.close()
-    return render_template_string(RESIDENT_HTML, household=hh, schedule=schedule, prediction=prediction, last_log=ll, notifs=notifs, my_reports=mr, today=today)
+    return render_template_string(RESIDENT_HTML, household=hh, schedule=schedule,
+                                  recent_collections=recent_collections,
+                                  last_log=ll, notifs=notifs, my_reports=mr, today=today)
 
 @app.route('/resident/report', methods=['POST'])
 @login_required
@@ -724,6 +878,7 @@ BASE_STYLE = """
   .form-group{margin-bottom:16px}.form-label{display:block;font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em}
   .form-control{width:100%;padding:9px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);font-family:inherit;font-size:13.5px;color:var(--text);background:var(--surface);transition:border-color .18s;outline:none}
   .form-control:focus{border-color:var(--green-500);box-shadow:0 0 0 3px rgba(34,197,94,.1)}
+  .form-control.is-invalid{border-color:#ef4444;box-shadow:0 0 0 3px rgba(239,68,68,.1)}
   select.form-control{cursor:pointer}textarea.form-control{resize:vertical}
   .progress{height:8px;background:#e2e8f0;border-radius:4px;overflow:hidden}
   .progress-bar{height:100%;background:linear-gradient(90deg,var(--green-400),var(--green-600));border-radius:4px;transition:width 1s}
@@ -732,6 +887,8 @@ BASE_STYLE = """
   .alert-danger{background:#fee2e2;color:#991b1b;border:1px solid #fecaca}
   .alert-success{background:var(--green-50);color:var(--green-800);border:1px solid var(--green-200)}
   .alert-info{background:#eff6ff;color:#1d4ed8;border:1px solid #dbeafe}
+  .alert ul{margin:6px 0 0 18px}
+  .alert ul li{margin-bottom:3px}
   .mobile-header{display:none;background:var(--surface);border-bottom:1px solid var(--border);padding:0 16px;height:56px;align-items:center;justify-content:space-between;position:fixed;top:0;left:0;right:0;z-index:200}
   @media(max-width:768px){.sidebar{transform:translateX(-100%)}.sidebar.open{transform:translateX(0)}.main-content{margin-left:0}.mobile-header{display:flex}.page-content{padding:16px;padding-top:72px}.grid-2{grid-template-columns:1fr}.stats-grid{grid-template-columns:1fr 1fr}.topbar{display:none}.sidebar-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:99}.sidebar-overlay.open{display:block}}
   .chart-container{position:relative;height:220px;width:100%}
@@ -747,6 +904,23 @@ BASE_STYLE = """
   .modal-title{font-size:16px;font-weight:700;margin-bottom:16px}
   .modal-footer{display:flex;gap:10px;justify-content:flex-end;margin-top:20px}
   .estimation-result{font-family:'DM Mono',monospace;font-size:20px;font-weight:700;color:var(--green-700);text-align:center;padding:8px;background:#fff;border-radius:6px;margin-top:8px}
+  /* Zone residents accordion */
+  .zone-section{border:1px solid var(--border);border-radius:var(--radius);margin-bottom:12px;overflow:hidden}
+  .zone-section-header{padding:14px 18px;background:var(--green-50);display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none;font-weight:600;font-size:13px;}
+  .zone-section-header:hover{background:var(--green-100)}
+  .zone-section-body{display:none;padding:0}
+  .zone-section-body.open{display:block}
+  /* Collector prediction panel */
+  .pred-pill{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:20px;font-size:11px;font-weight:600;margin:2px}
+  .pred-pill-high{background:#fee2e2;color:#991b1b}
+  .pred-pill-medium{background:#fef9c3;color:#854d0e}
+  .pred-pill-low{background:var(--green-100);color:var(--green-700)}
+  /* Collection history timeline */
+  .collection-timeline{display:flex;flex-direction:column;gap:8px}
+  .collection-item{display:flex;align-items:center;gap:12px;padding:10px 14px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg)}
+  .collection-icon{font-size:20px;flex-shrink:0}
+  .collection-info{flex:1;min-width:0}
+  .collection-date{font-size:12px;color:var(--text-muted);font-family:'DM Mono',monospace}
 </style>
 """
 
@@ -796,14 +970,47 @@ MOBILE_HEADER = """<div class="mobile-header"><button onclick="openSidebar()" st
 # ─────────────────────────────────────────────
 
 LOGIN_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>EcoTrack - Login</title>""" + BASE_STYLE + """
-<style>.login-page{min-height:100vh;display:flex;background:linear-gradient(135deg,#f0fdf4,#dcfce7,#f0fdf4)}.login-left{flex:1;display:flex;align-items:center;justify-content:center;padding:40px}.login-panel{background:#fff;border-radius:20px;padding:44px;width:100%;max-width:420px;box-shadow:0 20px 60px rgba(0,0,0,.08);animation:fadeUp .5s}.login-logo{display:flex;align-items:center;gap:12px;margin-bottom:32px}.login-logo-icon{width:48px;height:48px;background:linear-gradient(135deg,var(--green-500),var(--green-700));border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:22px;box-shadow:0 4px 14px rgba(34,197,94,.35)}.login-title{font-size:22px;font-weight:800}.login-sub{font-size:13px;color:var(--text-muted);margin-top:2px}.login-right{flex:1;background:linear-gradient(160deg,var(--green-600),var(--green-800));display:flex;align-items:center;justify-content:center;padding:60px;color:#fff}@media(max-width:768px){.login-right{display:none}.login-left{padding:20px}}.feature-list{list-style:none}.feature-list li{display:flex;align-items:center;gap:12px;margin-bottom:20px;font-size:15px}.feature-icon{width:40px;height:40px;background:rgba(255,255,255,.15);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}.btn-login{width:100%;padding:12px;font-size:14px;font-weight:700;background:linear-gradient(135deg,var(--green-500),var(--green-700));color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;transition:all .2s;box-shadow:0 4px 12px rgba(34,197,94,.3);font-family:inherit}.btn-login:hover{transform:translateY(-1px);box-shadow:0 6px 16px rgba(34,197,94,.4)}</style></head><body>
+<style>
+.login-page{min-height:100vh;display:flex;background:linear-gradient(135deg,#f0fdf4,#dcfce7,#f0fdf4)}
+.login-left{flex:1;display:flex;align-items:center;justify-content:center;padding:40px}
+.login-panel{background:#fff;border-radius:20px;padding:44px;width:100%;max-width:420px;box-shadow:0 20px 60px rgba(0,0,0,.08);animation:fadeUp .5s}
+.login-logo{display:flex;align-items:center;gap:12px;margin-bottom:32px}
+.login-logo-icon{width:48px;height:48px;background:linear-gradient(135deg,var(--green-500),var(--green-700));border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:22px;box-shadow:0 4px 14px rgba(34,197,94,.35)}
+.login-title{font-size:22px;font-weight:800}.login-sub{font-size:13px;color:var(--text-muted);margin-top:2px}
+.login-right{flex:1;background:linear-gradient(160deg,var(--green-600),var(--green-800));display:flex;align-items:center;justify-content:center;padding:60px;color:#fff}
+@media(max-width:768px){.login-right{display:none}.login-left{padding:20px}}
+.feature-list{list-style:none}.feature-list li{display:flex;align-items:center;gap:12px;margin-bottom:20px;font-size:15px}
+.feature-icon{width:40px;height:40px;background:rgba(255,255,255,.15);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
+.btn-login{width:100%;padding:12px;font-size:14px;font-weight:700;background:linear-gradient(135deg,var(--green-500),var(--green-700));color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;transition:all .2s;box-shadow:0 4px 12px rgba(34,197,94,.3);font-family:inherit}
+.btn-login:hover{transform:translateY(-1px);box-shadow:0 6px 16px rgba(34,197,94,.4)}
+.input-wrapper{position:relative}
+.input-icon{position:absolute;left:11px;top:50%;transform:translateY(-50%);font-size:15px;pointer-events:none}
+.input-wrapper .form-control{padding-left:34px}
+</style></head><body>
 <div class="login-page"><div class="login-left"><div class="login-panel">
 <div class="login-logo"><div class="login-logo-icon">♻️</div><div><div class="login-title">EcoTrack</div><div class="login-sub">Smart Barangay Waste Collection System</div></div></div>
-{% if error %}<div class="alert alert-danger">{{ error }}</div>{% endif %}
+{% if error %}
+<div class="alert alert-danger" style="display:flex;align-items:flex-start;gap:10px;">
+  <span style="font-size:16px;flex-shrink:0;">⚠️</span>
+  <div>{{ error }}</div>
+</div>
+{% endif %}
 <form method="POST" autocomplete="off">
-<div class="form-group"><label class="form-label">Email Address</label><input type="text" name="email" class="form-control" placeholder="Enter your email" required autocomplete="off"></div>
-<div class="form-group"><label class="form-label">Password</label><input type="password" name="password" class="form-control" placeholder="Enter your password" required autocomplete="new-password"></div>
-<button type="submit" class="btn-login">Sign In</button>
+<div class="form-group">
+  <label class="form-label">Email Address</label>
+  <div class="input-wrapper">
+    <span class="input-icon">📧</span>
+    <input type="text" name="email" class="form-control{% if error %} is-invalid{% endif %}" placeholder="your@email.com" required autocomplete="off">
+  </div>
+</div>
+<div class="form-group">
+  <label class="form-label">Password</label>
+  <div class="input-wrapper">
+    <span class="input-icon">🔒</span>
+    <input type="password" name="password" class="form-control{% if error %} is-invalid{% endif %}" placeholder="••••••••" required autocomplete="new-password">
+  </div>
+</div>
+<button type="submit" class="btn-login">Sign In →</button>
 </form>
 <div style="text-align:center;margin-top:20px;font-size:13px;color:var(--text-muted);">New resident? <a href="/register" style="color:var(--green-600);font-weight:600;">Register here</a></div>
 </div></div>
@@ -814,21 +1021,60 @@ LOGIN_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="vie
 # ─────────────────────────────────────────────
 
 REGISTER_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>EcoTrack - Register</title>""" + BASE_STYLE + """
-<style>.reg-page{min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#f0fdf4,#dcfce7);padding:24px}.reg-card{background:#fff;border-radius:20px;padding:40px;width:100%;max-width:520px;box-shadow:0 20px 60px rgba(0,0,0,.08);animation:fadeUp .5s}.reg-header{text-align:center;margin-bottom:28px}.reg-header h2{font-size:20px;font-weight:800}.reg-header p{font-size:13px;color:var(--text-muted)}.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}@media(max-width:480px){.form-grid{grid-template-columns:1fr}}.btn-register{width:100%;padding:12px;font-size:14px;font-weight:700;background:linear-gradient(135deg,var(--green-500),var(--green-700));color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-family:inherit;margin-top:8px;box-shadow:0 4px 12px rgba(34,197,94,.3)}.btn-register:hover{opacity:.9}</style></head><body>
-<div class="reg-page"><div class="reg-card"><div class="reg-header"><div style="font-size:32px;margin-bottom:8px;">♻️</div><h2>Create Resident Account</h2><p>Register your household to receive collection notifications</p></div>
-{% if error %}<div class="alert alert-danger">{{ error }}</div>{% endif %}
-{% if success %}<div class="alert alert-success">{{ success }} <a href="/login" style="color:var(--green-700);font-weight:600;">Click here to login</a></div>
+<style>
+.reg-page{min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#f0fdf4,#dcfce7);padding:24px}
+.reg-card{background:#fff;border-radius:20px;padding:40px;width:100%;max-width:520px;box-shadow:0 20px 60px rgba(0,0,0,.08);animation:fadeUp .5s}
+.reg-header{text-align:center;margin-bottom:28px}.reg-header h2{font-size:20px;font-weight:800}.reg-header p{font-size:13px;color:var(--text-muted)}
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:480px){.form-grid{grid-template-columns:1fr}}
+.btn-register{width:100%;padding:12px;font-size:14px;font-weight:700;background:linear-gradient(135deg,var(--green-500),var(--green-700));color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-family:inherit;margin-top:8px;box-shadow:0 4px 12px rgba(34,197,94,.3)}
+.btn-register:hover{opacity:.9}
+.field-hint{font-size:11px;color:var(--text-muted);margin-top:4px}
+</style></head><body>
+<div class="reg-page"><div class="reg-card">
+<div class="reg-header"><div style="font-size:32px;margin-bottom:8px;">♻️</div><h2>Create Resident Account</h2><p>Register your household to receive collection notifications</p></div>
+{% if errors %}
+<div class="alert alert-danger">
+  <strong>⚠️ Please fix the following:</strong>
+  <ul>{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul>
+</div>
+{% endif %}
+{% if success %}
+<div class="alert alert-success">✅ {{ success }} <a href="/login" style="color:var(--green-700);font-weight:600;">Click here to login</a></div>
 {% else %}
 <form method="POST" autocomplete="off">
 <div class="form-grid">
-<div class="form-group"><label class="form-label">Full Name</label><input type="text" name="name" class="form-control" placeholder="Juan dela Cruz" required autocomplete="off"></div>
-<div class="form-group"><label class="form-label">Email</label><input type="text" name="email" class="form-control" placeholder="you@email.com" required autocomplete="off"></div>
-<div class="form-group"><label class="form-label">Password</label><input type="password" name="password" class="form-control" placeholder="••••••••" required autocomplete="new-password"></div>
-<div class="form-group"><label class="form-label">Contact Number</label><input type="text" name="contact" class="form-control" placeholder="09XXXXXXXXX" autocomplete="off"></div>
+<div class="form-group">
+  <label class="form-label">Full Name <span style="color:#ef4444">*</span></label>
+  <input type="text" name="name" class="form-control{% if errors %} is-invalid{% endif %}" placeholder="Juan dela Cruz" value="{{ form_data.get('name','') }}" required autocomplete="off">
+  <div class="field-hint">Use your real full name</div>
 </div>
-<div class="form-group"><label class="form-label">Home Address</label><input type="text" name="address" class="form-control" placeholder="123 Rizal St, Brgy. San Pedro" autocomplete="off"></div>
-<div class="form-group"><label class="form-label">Barangay Zone</label><select name="zone" class="form-control"><option value="">-- Select your zone --</option>{% for z in zones %}<option value="{{ z.zone_name }}">{{ z.zone_name }}</option>{% endfor %}</select></div>
-<button type="submit" class="btn-register">Register</button>
+<div class="form-group">
+  <label class="form-label">Email <span style="color:#ef4444">*</span></label>
+  <input type="text" name="email" class="form-control{% if errors %} is-invalid{% endif %}" placeholder="you@email.com" value="{{ form_data.get('email','') }}" required autocomplete="off">
+</div>
+<div class="form-group">
+  <label class="form-label">Password <span style="color:#ef4444">*</span></label>
+  <input type="password" name="password" class="form-control{% if errors %} is-invalid{% endif %}" placeholder="Min. 6 characters" required autocomplete="new-password">
+</div>
+<div class="form-group">
+  <label class="form-label">Contact Number</label>
+  <input type="text" name="contact" class="form-control" placeholder="09XXXXXXXXX" value="{{ form_data.get('contact','') }}" autocomplete="off">
+  <div class="field-hint">Optional – PH format</div>
+</div>
+</div>
+<div class="form-group">
+  <label class="form-label">Home Address</label>
+  <input type="text" name="address" class="form-control" placeholder="123 Rizal St, Brgy. San Pedro" value="{{ form_data.get('address','') }}" autocomplete="off">
+</div>
+<div class="form-group">
+  <label class="form-label">Barangay Zone</label>
+  <select name="zone" class="form-control">
+    <option value="">-- Select your zone --</option>
+    {% for z in zones %}<option value="{{ z.zone_name }}" {% if form_data.get('zone')==z.zone_name %}selected{% endif %}>{{ z.zone_name }}</option>{% endfor %}
+  </select>
+</div>
+<button type="submit" class="btn-register">Create Account →</button>
 </form>
 {% endif %}
 <div style="text-align:center;margin-top:16px;font-size:13px;color:var(--text-muted);">Already have an account? <a href="/login" style="color:var(--green-600);font-weight:600;">Sign in</a></div>
@@ -841,33 +1087,102 @@ REGISTER_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="
 ADMIN_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Admin Dashboard - EcoTrack</title>""" + BASE_STYLE + """
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script></head><body>
 """ + MOBILE_HEADER + SIDEBAR_ADMIN + """
-<div class="main-content"><div class="topbar"><div class="topbar-title">🏠 Admin Dashboard</div><div class="topbar-right"><span style="font-size:12px;color:var(--text-muted);">Today: {{ today }}</span><button class="btn btn-primary btn-sm" onclick="runML()">🤖 Run ML</button><button class="btn btn-secondary btn-sm" onclick="openNotifModal()">🔔 Send Alert</button></div></div>
+<div class="main-content">
+<div class="topbar"><div class="topbar-title">🏠 Admin Dashboard</div><div class="topbar-right"><span style="font-size:12px;color:var(--text-muted);">Today: {{ today }}</span><button class="btn btn-primary btn-sm" onclick="runML()">🤖 Run ML</button><button class="btn btn-secondary btn-sm" onclick="openNotifModal()">🔔 Send Alert</button></div></div>
 <div class="page-content">
+
+<!-- STATS -->
 <div class="stats-grid">
 <div class="stat-card"><div class="stat-icon green">🏠</div><div class="stat-label">Total Households</div><div class="stat-value">{{ total_households }}</div><div class="stat-meta">Registered in system</div></div>
 <div class="stat-card"><div class="stat-icon green">✅</div><div class="stat-label">Collected Today</div><div class="stat-value">{{ collected }}</div><div class="stat-meta">{{ pct }}% completion rate</div></div>
 <div class="stat-card"><div class="stat-icon red">❌</div><div class="stat-label">Missed Pickups</div><div class="stat-value">{{ missed }}</div><div class="stat-meta">Requires follow-up</div></div>
 <div class="stat-card"><div class="stat-icon yellow">⚠️</div><div class="stat-label">Open Reports</div><div class="stat-value">{{ open_reports }}</div><div class="stat-meta">Resident complaints</div></div>
 </div>
+
+<!-- PROGRESS -->
 <div class="card mb-24"><div class="card-header"><div><div class="card-title">Collection Completion</div><div class="card-subtitle">Today's progress across all zones</div></div><span class="badge badge-green">{{ pct }}% Done</span></div><div class="progress"><div class="progress-bar" id="progress-bar" style="width:0%"></div></div><div style="display:flex;gap:20px;margin-top:12px;font-size:12px;color:var(--text-muted);"><span>✅ Collected: {{ collected }}</span><span>⏳ Delayed: {{ delayed }}</span><span>❌ Missed: {{ missed }}</span></div></div>
+
+<!-- CHARTS -->
 <div class="grid-2 mb-24">
 <div class="card"><div class="card-header"><div><div class="card-title">📈 Waste Volume Trend</div><div class="card-subtitle">Last 7 days (kg)</div></div></div><div class="chart-container"><canvas id="trendChart"></canvas></div></div>
 <div class="card"><div class="card-header"><div><div class="card-title">📊 Zone Performance</div><div class="card-subtitle">Collected vs Missed</div></div></div><div class="chart-container"><canvas id="zoneChart"></canvas></div></div>
 </div>
+
+<!-- SCHEDULES + HIGH RISK -->
 <div class="grid-2 mb-24">
 <div class="card"><div class="card-header"><div class="card-title">📅 Today's Schedule</div><a href="/admin/schedules" class="btn btn-ghost btn-sm">Manage</a></div>{% if today_schedules %}<div class="table-wrap"><table><thead><tr><th>Zone</th><th>Time</th><th>Status</th></tr></thead><tbody>{% for s in today_schedules %}<tr><td>{{ s.zone_name }}</td><td>{{ s.collection_time }}</td><td><span class="badge badge-green">Active</span></td></tr>{% endfor %}</tbody></table></div>{% else %}<div class="empty-state"><p>No scheduled pickups today</p></div>{% endif %}</div>
 <div class="card"><div class="card-header"><div><div class="card-title">🔴 High-Risk Zones</div><div class="card-subtitle">ML Predictions</div></div><a href="/admin/analytics" class="btn btn-ghost btn-sm">View All</a></div>{% if high_risk %}<div class="table-wrap"><table><thead><tr><th>Zone</th><th>Date</th><th>Level</th><th>Confidence</th></tr></thead><tbody>{% for h in high_risk %}<tr><td>{{ h.zone_name }}</td><td>{{ h.predicted_date }}</td><td><span class="risk-dot risk-high"></span> High</td><td>{{ (h.confidence_score*100)|int }}%</td></tr>{% endfor %}</tbody></table></div>{% else %}<div class="empty-state"><p>No high-risk zones predicted</p></div>{% endif %}</div>
 </div>
+
+<!-- MAP -->
 <div class="card mb-24"><div class="card-header"><div><div class="card-title">🗺️ Zone Map Overview</div><div class="card-subtitle">Live collection status</div></div></div><div id="mapView" style="height:280px;border-radius:10px;background:linear-gradient(135deg,#f0fdf4,#dcfce7);border:1px solid var(--green-200);position:relative;overflow:hidden;"><div id="mapZones" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;gap:20px;flex-wrap:wrap;padding:20px;"></div></div></div>
+
+<!-- RESIDENT COLLECTION STATUS PER ZONE -->
+<div class="card mb-24">
+  <div class="card-header">
+    <div>
+      <div class="card-title">👥 Resident Collection Status by Zone</div>
+      <div class="card-subtitle">Last logged collection per resident</div>
+    </div>
+    <span class="badge badge-blue">{{ zone_residents|length }} zones</span>
+  </div>
+  {% if zone_residents %}
+    {% for zr in zone_residents %}
+    <div class="zone-section">
+      <div class="zone-section-header" onclick="toggleZone('zone-{{ zr.zone_id }}')">
+        <span>🗺️ {{ zr.zone_name }}</span>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <span style="font-size:12px;color:var(--text-muted);font-weight:400;">{{ zr.residents|length }} resident(s)</span>
+          <span id="arrow-zone-{{ zr.zone_id }}" style="font-size:12px;transition:transform .2s;">▼</span>
+        </div>
+      </div>
+      <div class="zone-section-body" id="zone-{{ zr.zone_id }}">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Resident</th><th>Address</th><th>Contact</th><th>Last Status</th><th>Last Collected</th></tr></thead>
+            <tbody>
+            {% for r in zr.residents %}
+            <tr>
+              <td><strong>{{ r.name }}</strong></td>
+              <td style="font-size:12px;color:var(--text-muted);">{{ r.address or '—' }}</td>
+              <td style="font-size:12px;">{{ r.contact_number or '—' }}</td>
+              <td>
+                {% if r.last_status == 'collected' %}
+                  <span class="badge badge-green">✅ Collected</span>
+                {% elif r.last_status == 'missed' %}
+                  <span class="badge badge-red">❌ Missed</span>
+                {% elif r.last_status == 'delayed' %}
+                  <span class="badge badge-yellow">⏳ Delayed</span>
+                {% else %}
+                  <span class="badge badge-gray">— No data</span>
+                {% endif %}
+              </td>
+              <td style="font-size:11px;font-family:'DM Mono',monospace;color:var(--text-muted);">{{ r.last_collected[:16] if r.last_collected else '—' }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+  {% else %}
+    <div class="empty-state"><p>No resident data found.</p></div>
+  {% endif %}
+</div>
+
 </div></div>
+
+<!-- MODALS -->
 <div class="modal-backdrop" id="notifModal"><div class="modal"><div class="modal-title">📢 Send Notification</div><div class="form-group"><label class="form-label">Message</label><textarea id="notifMsg" class="form-control" rows="3" placeholder="Enter message..."></textarea></div><div class="form-group"><label class="form-label">Type</label><select id="notifType" class="form-control"><option value="web">Web</option><option value="email">Email</option><option value="SMS">SMS</option></select></div><div class="modal-footer"><button class="btn btn-ghost" onclick="closeNotifModal()">Cancel</button><button class="btn btn-primary" onclick="sendNotification()">Send</button></div></div></div>
-<div id="mlStatus" style="display:none;position:fixed;bottom:20px;right:20px;background:var(--green-700);color:#fff;padding:12px 20px;border-radius:10px;font-size:13px;font-weight:600;z-index:999;box-shadow:var(--shadow-lg);">🤖 ML predictions updated!</div>
+<div id="mlStatus" style="display:none;position:fixed;bottom:20px;right:20px;background:var(--green-700);color:#fff;padding:12px 20px;border-radius:10px;font-size:13px;font-weight:600;z-index:999;box-shadow:var(--shadow-lg);"></div>
 """ + JS_SIDEBAR + """
 <script>
 setTimeout(()=>{document.getElementById('progress-bar').style.width='{{ pct }}%'},400);
 new Chart(document.getElementById('trendChart'),{type:'line',data:{labels:{{ trend_data|tojson }}.map(d=>d.date.slice(5)),datasets:[{label:'Waste Volume (kg)',data:{{ trend_data|tojson }}.map(d=>d.volume),borderColor:'#16a34a',backgroundColor:'rgba(34,197,94,0.1)',tension:0.4,fill:true}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{grid:{display:false}},y:{grid:{color:'#f0fdf4'}}}}});
 new Chart(document.getElementById('zoneChart'),{type:'bar',data:{labels:{{ zone_perf|tojson }}.map(z=>z.zone_name.substring(0,15)),datasets:[{label:'Collected',data:{{ zone_perf|tojson }}.map(z=>z.collected||0),backgroundColor:'#22c55e'},{label:'Missed',data:{{ zone_perf|tojson }}.map(z=>z.missed||0),backgroundColor:'#ef4444'},{label:'Delayed',data:{{ zone_perf|tojson }}.map(z=>z.delayed||0),backgroundColor:'#f59e0b'}]},options:{responsive:true,maintainAspectRatio:false,scales:{x:{stacked:true,grid:{display:false}},y:{stacked:true,grid:{color:'#f0fdf4'}}},plugins:{legend:{position:'bottom',labels:{boxWidth:12,font:{size:11}}}}}});
 fetch('/api/map-data').then(r=>r.json()).then(zones=>{const c=document.getElementById('mapZones'),rc={high:'#ef4444',medium:'#f59e0b',low:'#22c55e'};zones.forEach(z=>{const d=document.createElement('div');d.style.cssText=`background:#fff;border-radius:12px;padding:12px 16px;text-align:center;min-width:110px;border:2px solid ${rc[z.waste_level]||'#e2e8f0'};box-shadow:0 2px 8px rgba(0,0,0,.08);`;d.innerHTML=`<div style="font-size:12px;font-weight:700;color:#0f172a;">${z.zone_name.substring(0,20)}</div><div style="font-size:10px;color:#64748b;margin-top:2px;">Risk: ${z.waste_level}</div>`;c.appendChild(d)})});
+function toggleZone(id){const body=document.getElementById(id);const arrow=document.getElementById('arrow-'+id);const isOpen=body.classList.contains('open');body.classList.toggle('open');arrow.style.transform=isOpen?'':'rotate(180deg)'}
 function runML(){const b=event.target;b.disabled=true;b.innerHTML='⏳ Processing...';fetch('/api/run-ml',{method:'POST'}).then(r=>r.json()).then(d=>{b.disabled=false;b.innerHTML='🤖 Run ML';const e=document.getElementById('mlStatus');e.style.display='block';e.textContent=`🤖 ${d.predictions_generated} predictions updated!`;setTimeout(()=>{e.style.display='none';location.reload()},3000)})}
 function openNotifModal(){document.getElementById('notifModal').classList.add('open')}
 function closeNotifModal(){document.getElementById('notifModal').classList.remove('open')}
@@ -941,16 +1256,132 @@ NOTIF_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="vie
 
 COLLECTOR_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Collector Dashboard - EcoTrack</title>""" + BASE_STYLE + """
 <script>
-function updateEstimate(){const c=parseInt(document.getElementById('est_bin_count').value)||0,t=document.getElementById('est_bin_type').value,f=document.getElementById('est_fill_level').value;const w={'small_bag':8,'medium_bag':15,'large_bag':25,'small_drum':30,'medium_drum':60,'large_drum':100,'small_bin':20,'large_bin':40};const m={'quarter':0.25,'half':0.5,'mostly':0.75,'full':1.0,'overflow':1.3};document.getElementById('estimated_result').textContent='Estimated: '+Math.round(c*(w[t]||15)*(m[f]||1.0))+' kg'}
-document.addEventListener('DOMContentLoaded',function(){['est_bin_count','est_bin_type','est_fill_level'].forEach(id=>{const el=document.getElementById(id);if(el){el.addEventListener('change',updateEstimate);el.addEventListener('input',updateEstimate)}});updateEstimate()});
+function updateEstimate(){
+  const c=parseInt(document.getElementById('est_bin_count').value)||0,
+        t=document.getElementById('est_bin_type').value,
+        f=document.getElementById('est_fill_level').value;
+  const w={'small_bag':8,'medium_bag':15,'large_bag':25,'small_drum':30,'medium_drum':60,'large_drum':100,'small_bin':20,'large_bin':40};
+  const m={'quarter':0.25,'half':0.5,'mostly':0.75,'full':1.0,'overflow':1.3};
+  document.getElementById('estimated_result').textContent='Estimated: '+Math.round(c*(w[t]||15)*(m[f]||1.0))+' kg';
+}
+document.addEventListener('DOMContentLoaded',function(){
+  ['est_bin_count','est_bin_type','est_fill_level'].forEach(id=>{
+    const el=document.getElementById(id);
+    if(el){el.addEventListener('change',updateEstimate);el.addEventListener('input',updateEstimate)}
+  });
+  updateEstimate();
+});
+function togglePred(zoneId){
+  const el=document.getElementById('pred-'+zoneId);
+  if(el){el.style.display=el.style.display==='none'?'block':'none';}
+}
 </script></head><body>
 """ + MOBILE_HEADER + SIDEBAR_COLLECTOR + """
-<div class="main-content"><div class="topbar"><div class="topbar-title">🚛 Collector Dashboard</div><span style="font-size:13px;color:var(--text-muted);">{{ today }}'s Routes</span></div><div class="page-content">
-<div class="stats-grid mb-24">{% set ct=stats|selectattr('status','eq','collected')|list %}{% set mt=stats|selectattr('status','eq','missed')|list %}{% set dt=stats|selectattr('status','eq','delayed')|list %}<div class="stat-card"><div class="stat-icon green">✅</div><div class="stat-label">Collected</div><div class="stat-value">{{ ct[0].cnt if ct else 0 }}</div></div><div class="stat-card"><div class="stat-icon red">❌</div><div class="stat-label">Missed</div><div class="stat-value">{{ mt[0].cnt if mt else 0 }}</div></div><div class="stat-card"><div class="stat-icon yellow">⏳</div><div class="stat-label">Delayed</div><div class="stat-value">{{ dt[0].cnt if dt else 0 }}</div></div><div class="stat-card"><div class="stat-icon blue">🗺️</div><div class="stat-label">Zones</div><div class="stat-value">{{ assigned|length }}</div></div></div>
+<div class="main-content">
+<div class="topbar"><div class="topbar-title">🚛 Collector Dashboard</div><span style="font-size:13px;color:var(--text-muted);">{{ today }}'s Routes</span></div>
+<div class="page-content">
+
+<!-- STATS -->
+<div class="stats-grid mb-24">
+{% set ct=stats|selectattr('status','eq','collected')|list %}
+{% set mt=stats|selectattr('status','eq','missed')|list %}
+{% set dt=stats|selectattr('status','eq','delayed')|list %}
+<div class="stat-card"><div class="stat-icon green">✅</div><div class="stat-label">Collected</div><div class="stat-value">{{ ct[0].cnt if ct else 0 }}</div></div>
+<div class="stat-card"><div class="stat-icon red">❌</div><div class="stat-label">Missed</div><div class="stat-value">{{ mt[0].cnt if mt else 0 }}</div></div>
+<div class="stat-card"><div class="stat-icon yellow">⏳</div><div class="stat-label">Delayed</div><div class="stat-value">{{ dt[0].cnt if dt else 0 }}</div></div>
+<div class="stat-card"><div class="stat-icon blue">🗺️</div><div class="stat-label">Zones</div><div class="stat-value">{{ assigned|length }}</div></div>
+</div>
+
 <div class="alert alert-info mb-24"><strong>📏 Estimation Guide:</strong> Small Bag (8kg) | Medium Bag (15kg) | Large Bag (25kg) | Small Drum (30kg) | Medium Drum (60kg) | Large Drum (100kg)</div>
-<div class="grid-2 mb-24"><div class="card"><div class="card-header"><div class="card-title">📍 Today's Assigned Zones</div></div>{% if assigned %}{% for a in assigned %}<div style="background:var(--green-50);border:1px solid var(--green-200);border-radius:var(--radius-sm);padding:14px;margin-bottom:10px;"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;"><div><strong>{{ a.zone_name }}</strong></div><span style="font-family:'DM Mono';font-size:13px;color:var(--green-700);background:#fff;padding:3px 8px;border-radius:6px;">⏰ {{ a.collection_time }}</span></div><form method="POST" action="/collector/log"><input type="hidden" name="zone_id" value="{{ a.zone_id }}"><div class="form-group" style="margin-bottom:6px;"><label class="form-label" style="font-size:10px;">Number of Containers</label><input type="number" name="bin_count" class="form-control" value="2" min="0" max="20" style="padding:6px 10px;font-size:12px;" required></div><div class="form-group" style="margin-bottom:6px;"><label class="form-label" style="font-size:10px;">Container Type</label><select name="bin_type" class="form-control" style="padding:6px 10px;font-size:12px;"><option value="small_bag">Small Bag (8kg)</option><option value="medium_bag">Medium Bag (15kg)</option><option value="large_bag">Large Bag (25kg)</option><option value="small_drum">Small Drum (30kg)</option><option value="medium_drum" selected>Medium Drum (60kg)</option><option value="large_drum">Large Drum (100kg)</option></select></div><div class="form-group" style="margin-bottom:6px;"><label class="form-label" style="font-size:10px;">Fill Level</label><select name="fill_level" class="form-control" style="padding:6px 10px;font-size:12px;"><option value="quarter">25% - Quarter</option><option value="half">50% - Half</option><option value="mostly">75% - Mostly</option><option value="full" selected>100% - Full</option><option value="overflow">Overflowing</option></select></div><div class="form-group" style="margin-bottom:6px;"><label class="form-label" style="font-size:10px;">Status</label><select name="status" class="form-control" style="padding:6px 10px;font-size:12px;"><option value="collected">✅ Collected</option><option value="missed">❌ Missed</option><option value="delayed">⏳ Delayed</option></select></div><div class="form-group" style="margin-bottom:6px;"><label class="form-label" style="font-size:10px;">Remarks</label><input type="text" name="remarks" class="form-control" style="padding:6px 10px;font-size:12px;" placeholder="Optional..."></div><button type="submit" class="btn btn-primary btn-sm" style="width:100%;">📝 Log Collection</button></form></div>{% endfor %}{% else %}<div class="empty-state"><p>No collections scheduled today</p></div>{% endif %}</div>
-<div><div class="card mb-20"><div class="card-header"><div><div class="card-title">🧮 Live Calculator</div></div></div><div class="form-group"><label class="form-label">Containers</label><input type="number" id="est_bin_count" class="form-control" value="3" min="0" max="20"></div><div class="form-group"><label class="form-label">Type</label><select id="est_bin_type" class="form-control"><option value="small_bag">Small Bag (8kg)</option><option value="medium_bag">Medium Bag (15kg)</option><option value="large_bag">Large Bag (25kg)</option><option value="small_drum">Small Drum (30kg)</option><option value="medium_drum" selected>Medium Drum (60kg)</option><option value="large_drum">Large Drum (100kg)</option></select></div><div class="form-group"><label class="form-label">Fill Level</label><select id="est_fill_level" class="form-control"><option value="quarter">25%</option><option value="half">50%</option><option value="mostly">75%</option><option value="full" selected>100%</option><option value="overflow">Overflow</option></select></div><div class="estimation-result" id="estimated_result">Estimated: -- kg</div></div><div class="card"><div class="card-header"><div class="card-title">📝 Manual Log Entry</div></div><form method="POST" action="/collector/log"><div class="form-group"><label class="form-label">Zone</label><select name="zone_id" class="form-control">{% for z in all_zones %}<option value="{{ z.zone_id }}">{{ z.zone_name }}</option>{% endfor %}</select></div><div class="form-group"><label class="form-label">Status</label><select name="status" class="form-control"><option value="collected">✅ Collected</option><option value="missed">❌ Missed</option><option value="delayed">⏳ Delayed</option></select></div><div class="form-group"><label class="form-label">Containers</label><input type="number" name="bin_count" class="form-control" value="2" min="0" required></div><div class="form-group"><label class="form-label">Type</label><select name="bin_type" class="form-control"><option value="medium_drum" selected>Medium Drum (60kg)</option><option value="large_drum">Large Drum (100kg)</option><option value="small_drum">Small Drum (30kg)</option></select></div><div class="form-group"><label class="form-label">Fill Level</label><select name="fill_level" class="form-control"><option value="full" selected>Full</option><option value="mostly">Mostly</option><option value="half">Half</option><option value="quarter">Quarter</option></select></div><div class="form-group"><label class="form-label">Remarks</label><textarea name="remarks" class="form-control" rows="2" placeholder="Optional..."></textarea></div><button type="submit" class="btn btn-primary" style="width:100%;">Submit Log</button></form></div></div></div>
-<div class="card"><div class="card-header"><div class="card-title">📋 Recent Logs</div></div><div class="table-wrap"><table><thead><tr><th>Zone</th><th>Status</th><th>Volume</th><th>Remarks</th><th>Time</th></tr></thead><tbody>{% for l in recent_logs %}<tr><td><strong>{{ l.zone_name }}</strong></td><td><span class="badge {% if l.status=='collected' %}badge-green{% elif l.status=='missed' %}badge-red{% else %}badge-yellow{% endif %}">{{ l.status }}</span></td><td style="font-size:12px;">{% if l.bin_count %}{{ l.bin_count }}x {{ l.bin_type.replace('_',' ') }}{% else %}—{% endif %}</td><td style="font-size:12px;">{{ l.remarks or '—' }}</td><td style="font-size:11px;">{{ l.collected_at[:16] }}</td></tr>{% endfor %}</tbody></table></div></div>
+
+<!-- ZONES + PREDICTIONS -->
+<div class="grid-2 mb-24">
+
+  <!-- LEFT: Assigned Zones with Log Form -->
+  <div class="card">
+    <div class="card-header"><div class="card-title">📍 Today's Assigned Zones</div></div>
+    {% if assigned %}
+      {% for a in assigned %}
+      <div style="background:var(--green-50);border:1px solid var(--green-200);border-radius:var(--radius-sm);padding:14px;margin-bottom:10px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+          <div><strong>{{ a.zone_name }}</strong></div>
+          <span style="font-family:'DM Mono';font-size:13px;color:var(--green-700);background:#fff;padding:3px 8px;border-radius:6px;">⏰ {{ a.collection_time }}</span>
+        </div>
+        <!-- ML Prediction toggle -->
+        {% if zone_predictions.get(a.zone_id) %}
+        <div style="margin-bottom:10px;">
+          <button type="button" onclick="togglePred({{ a.zone_id }})" class="btn btn-secondary btn-sm" style="width:100%;justify-content:center;">🔮 View ML Predictions</button>
+          <div id="pred-{{ a.zone_id }}" style="display:none;margin-top:8px;background:#fff;border-radius:8px;padding:10px;border:1px solid var(--green-200);">
+            <div style="font-size:11px;font-weight:700;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em;">7-Day Forecast</div>
+            <div style="display:flex;flex-wrap:wrap;gap:4px;">
+            {% for pred in zone_predictions[a.zone_id] %}
+              <span class="pred-pill pred-pill-{{ pred.waste_level }}">
+                <span class="risk-dot risk-{{ pred.waste_level }}" style="width:7px;height:7px;"></span>
+                {{ pred.predicted_date[5:] }} · {{ pred.waste_level }} · {{ (pred.confidence_score*100)|int }}%
+              </span>
+            {% endfor %}
+            </div>
+          </div>
+        </div>
+        {% endif %}
+        <!-- Log form -->
+        <form method="POST" action="/collector/log">
+          <input type="hidden" name="zone_id" value="{{ a.zone_id }}">
+          <div class="form-group" style="margin-bottom:6px;"><label class="form-label" style="font-size:10px;">Number of Containers</label><input type="number" name="bin_count" class="form-control" value="2" min="0" max="20" style="padding:6px 10px;font-size:12px;" required></div>
+          <div class="form-group" style="margin-bottom:6px;"><label class="form-label" style="font-size:10px;">Container Type</label><select name="bin_type" class="form-control" style="padding:6px 10px;font-size:12px;"><option value="small_bag">Small Bag (8kg)</option><option value="medium_bag">Medium Bag (15kg)</option><option value="large_bag">Large Bag (25kg)</option><option value="small_drum">Small Drum (30kg)</option><option value="medium_drum" selected>Medium Drum (60kg)</option><option value="large_drum">Large Drum (100kg)</option></select></div>
+          <div class="form-group" style="margin-bottom:6px;"><label class="form-label" style="font-size:10px;">Fill Level</label><select name="fill_level" class="form-control" style="padding:6px 10px;font-size:12px;"><option value="quarter">25% - Quarter</option><option value="half">50% - Half</option><option value="mostly">75% - Mostly</option><option value="full" selected>100% - Full</option><option value="overflow">Overflowing</option></select></div>
+          <div class="form-group" style="margin-bottom:6px;"><label class="form-label" style="font-size:10px;">Status</label><select name="status" class="form-control" style="padding:6px 10px;font-size:12px;"><option value="collected">✅ Collected</option><option value="missed">❌ Missed</option><option value="delayed">⏳ Delayed</option></select></div>
+          <div class="form-group" style="margin-bottom:6px;"><label class="form-label" style="font-size:10px;">Remarks</label><input type="text" name="remarks" class="form-control" style="padding:6px 10px;font-size:12px;" placeholder="Optional..."></div>
+          <button type="submit" class="btn btn-primary btn-sm" style="width:100%;">📝 Log Collection</button>
+        </form>
+      </div>
+      {% endfor %}
+    {% else %}
+      <div class="empty-state"><p>No collections scheduled today</p></div>
+    {% endif %}
+  </div>
+
+  <!-- RIGHT: Calculator + Manual Log -->
+  <div>
+    <div class="card mb-20">
+      <div class="card-header"><div><div class="card-title">🧮 Live Calculator</div></div></div>
+      <div class="form-group"><label class="form-label">Containers</label><input type="number" id="est_bin_count" class="form-control" value="3" min="0" max="20"></div>
+      <div class="form-group"><label class="form-label">Type</label><select id="est_bin_type" class="form-control"><option value="small_bag">Small Bag (8kg)</option><option value="medium_bag">Medium Bag (15kg)</option><option value="large_bag">Large Bag (25kg)</option><option value="small_drum">Small Drum (30kg)</option><option value="medium_drum" selected>Medium Drum (60kg)</option><option value="large_drum">Large Drum (100kg)</option></select></div>
+      <div class="form-group"><label class="form-label">Fill Level</label><select id="est_fill_level" class="form-control"><option value="quarter">25%</option><option value="half">50%</option><option value="mostly">75%</option><option value="full" selected>100%</option><option value="overflow">Overflow</option></select></div>
+      <div class="estimation-result" id="estimated_result">Estimated: -- kg</div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><div class="card-title">📝 Manual Log Entry</div></div>
+      <form method="POST" action="/collector/log">
+        <div class="form-group"><label class="form-label">Zone</label><select name="zone_id" class="form-control">{% for z in all_zones %}<option value="{{ z.zone_id }}">{{ z.zone_name }}</option>{% endfor %}</select></div>
+        <div class="form-group"><label class="form-label">Status</label><select name="status" class="form-control"><option value="collected">✅ Collected</option><option value="missed">❌ Missed</option><option value="delayed">⏳ Delayed</option></select></div>
+        <div class="form-group"><label class="form-label">Containers</label><input type="number" name="bin_count" class="form-control" value="2" min="0" required></div>
+        <div class="form-group"><label class="form-label">Type</label><select name="bin_type" class="form-control"><option value="medium_drum" selected>Medium Drum (60kg)</option><option value="large_drum">Large Drum (100kg)</option><option value="small_drum">Small Drum (30kg)</option></select></div>
+        <div class="form-group"><label class="form-label">Fill Level</label><select name="fill_level" class="form-control"><option value="full" selected>Full</option><option value="mostly">Mostly</option><option value="half">Half</option><option value="quarter">Quarter</option></select></div>
+        <div class="form-group"><label class="form-label">Remarks</label><textarea name="remarks" class="form-control" rows="2" placeholder="Optional..."></textarea></div>
+        <button type="submit" class="btn btn-primary" style="width:100%;">Submit Log</button>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- RECENT LOGS -->
+<div class="card">
+  <div class="card-header"><div class="card-title">📋 Recent Logs</div></div>
+  <div class="table-wrap"><table><thead><tr><th>Zone</th><th>Status</th><th>Volume</th><th>Remarks</th><th>Time</th></tr></thead><tbody>
+  {% for l in recent_logs %}
+  <tr>
+    <td><strong>{{ l.zone_name }}</strong></td>
+    <td><span class="badge {% if l.status=='collected' %}badge-green{% elif l.status=='missed' %}badge-red{% else %}badge-yellow{% endif %}">{{ l.status }}</span></td>
+    <td style="font-size:12px;">{% if l.bin_count %}{{ l.bin_count }}x {{ l.bin_type.replace('_',' ') }}{% else %}—{% endif %}</td>
+    <td style="font-size:12px;">{{ l.remarks or '—' }}</td>
+    <td style="font-size:11px;">{{ l.collected_at[:16] }}</td>
+  </tr>
+  {% endfor %}
+  </tbody></table></div>
+</div>
+
 </div></div>
 """ + JS_SIDEBAR + """</body></html>"""
 
@@ -960,12 +1391,143 @@ document.addEventListener('DOMContentLoaded',function(){['est_bin_count','est_bi
 
 RESIDENT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>My Dashboard - EcoTrack</title>""" + BASE_STYLE + """</head><body>
 """ + MOBILE_HEADER + SIDEBAR_RESIDENT + """
-<div class="main-content"><div class="topbar"><div class="topbar-title">🏡 My Dashboard</div><span style="font-size:13px;color:var(--text-muted);">{{ today }}</span></div><div class="page-content">
-{% if household %}<div class="card mb-24" style="background:linear-gradient(135deg,var(--green-600),var(--green-800));color:#fff;border:none;"><div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;"><div style="font-size:40px;">🏠</div><div style="flex:1;"><div style="font-size:18px;font-weight:800;">{{ session.name }}'s Household</div><div style="opacity:.85;font-size:13px;">📍 {{ household.address }}</div><div style="opacity:.85;font-size:13px;">🗺️ {{ household.barangay_zone }}</div></div>{% if last_log %}<div style="background:rgba(255,255,255,.15);padding:12px 18px;border-radius:10px;text-align:center;"><div style="font-size:11px;opacity:.8;">Last Collection</div><div style="font-size:20px;">{% if last_log.status=='collected' %}✅{% elif last_log.status=='missed' %}❌{% else %}⏳{% endif %}</div><div style="font-size:13px;font-weight:700;">{{ last_log.status }}</div><div style="font-size:11px;opacity:.7;">{{ last_log.collected_at[:10] }}</div></div>{% endif %}</div></div>{% endif %}
-<div class="grid-2 mb-24"><div class="card"><div class="card-header"><div class="card-title">📅 My Schedule</div></div>{% if schedule %}{% for s in schedule %}<div style="display:flex;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--border);"><div><div style="font-weight:600;">{{ s.collection_day }}</div><div style="font-size:12px;color:var(--text-muted);">Weekly pickup</div></div><div style="text-align:right;"><div style="font-family:'DM Mono';font-size:15px;font-weight:700;color:var(--green-700);">{{ s.collection_time }}</div><span class="badge badge-green">{{ s.status }}</span></div></div>{% endfor %}{% else %}<div class="empty-state"><p>No schedule found</p></div>{% endif %}</div>
-<div class="card"><div class="card-header"><div><div class="card-title">🔮 Predictions</div><div class="card-subtitle">AI forecast for your zone</div></div></div>{% if prediction %}{% for p in prediction %}<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);"><div style="font-size:13px;font-family:'DM Mono';">{{ p.predicted_date }}</div><div style="display:flex;align-items:center;gap:8px;"><span class="risk-dot risk-{{ p.waste_level }}"></span><span class="badge {% if p.waste_level=='high' %}badge-red{% elif p.waste_level=='medium' %}badge-yellow{% else %}badge-green{% endif %}">{{ p.waste_level }}</span><span style="font-size:11px;color:var(--text-muted);">{{ (p.confidence_score*100)|int }}%</span></div></div>{% endfor %}{% else %}<div class="empty-state"><p>No predictions available</p></div>{% endif %}</div></div>
-<div class="grid-2 mb-24"><div class="card"><div class="card-header"><div class="card-title">🔔 Notifications</div><span class="badge badge-green">{{ notifs|length }}</span></div>{% if notifs %}{% for n in notifs %}<div style="padding:10px 0;border-bottom:1px solid var(--border);"><div style="font-size:13px;">{{ n.message }}</div><div style="font-size:11px;color:var(--text-muted);">{{ n.sent_at[:16] }}</div></div>{% endfor %}{% else %}<div class="empty-state"><p>No notifications yet</p></div>{% endif %}</div>
-<div class="card"><div class="card-header"><div class="card-title">📢 Submit Report</div></div><form method="POST" action="/resident/report"><div class="form-group"><label class="form-label">Issue Type</label><select name="issue_type" class="form-control"><option value="missed pickup">Missed Pickup</option><option value="overflow">Bin Overflow</option><option value="wrong schedule">Wrong Schedule</option><option value="other">Other</option></select></div><div class="form-group"><label class="form-label">Description</label><textarea name="description" class="form-control" rows="3" placeholder="Describe the issue..." required></textarea></div><button type="submit" class="btn btn-primary" style="width:100%;">Submit Report</button></form></div></div>
+<div class="main-content">
+<div class="topbar"><div class="topbar-title">🏡 My Dashboard</div><span style="font-size:13px;color:var(--text-muted);">{{ today }}</span></div>
+<div class="page-content">
+
+<!-- HOUSEHOLD BANNER -->
+{% if household %}
+<div class="card mb-24" style="background:linear-gradient(135deg,var(--green-600),var(--green-800));color:#fff;border:none;">
+  <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
+    <div style="font-size:40px;">🏠</div>
+    <div style="flex:1;">
+      <div style="font-size:18px;font-weight:800;">{{ session.name }}'s Household</div>
+      <div style="opacity:.85;font-size:13px;">📍 {{ household.address }}</div>
+      <div style="opacity:.85;font-size:13px;">🗺️ {{ household.barangay_zone }}</div>
+    </div>
+    {% if last_log %}
+    <div style="background:rgba(255,255,255,.15);padding:12px 18px;border-radius:10px;text-align:center;">
+      <div style="font-size:11px;opacity:.8;">Last Collection</div>
+      <div style="font-size:24px;">{% if last_log.status=='collected' %}✅{% elif last_log.status=='missed' %}❌{% else %}⏳{% endif %}</div>
+      <div style="font-size:13px;font-weight:700;text-transform:capitalize;">{{ last_log.status }}</div>
+      <div style="font-size:11px;opacity:.7;">{{ last_log.collected_at[:10] }}</div>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+<!-- SCHEDULE + COLLECTION HISTORY -->
+<div class="grid-2 mb-24">
+
+  <!-- Schedule -->
+  <div class="card">
+    <div class="card-header"><div class="card-title">📅 My Collection Schedule</div></div>
+    {% if schedule %}
+      {% for s in schedule %}
+      <div style="display:flex;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--border);">
+        <div>
+          <div style="font-weight:600;">{{ s.collection_day }}</div>
+          <div style="font-size:12px;color:var(--text-muted);">Weekly pickup</div>
+        </div>
+        <div style="text-align:right;">
+          <div style="font-family:'DM Mono';font-size:15px;font-weight:700;color:var(--green-700);">{{ s.collection_time }}</div>
+          <span class="badge badge-green">{{ s.status }}</span>
+        </div>
+      </div>
+      {% endfor %}
+    {% else %}
+      <div class="empty-state"><p>No schedule found for your zone</p></div>
+    {% endif %}
+  </div>
+
+  <!-- Collection History -->
+  <div class="card">
+    <div class="card-header">
+      <div>
+        <div class="card-title">📦 Collection History</div>
+        <div class="card-subtitle">Recent pickups in your zone</div>
+      </div>
+    </div>
+    {% if recent_collections %}
+    <div class="collection-timeline">
+      {% for c in recent_collections %}
+      <div class="collection-item">
+        <div class="collection-icon">
+          {% if c.status == 'collected' %}✅
+          {% elif c.status == 'missed' %}❌
+          {% else %}⏳{% endif %}
+        </div>
+        <div class="collection-info">
+          <div style="font-weight:600;font-size:13px;text-transform:capitalize;">{{ c.status }}</div>
+          {% if c.bin_count %}
+          <div style="font-size:11px;color:var(--text-muted);">{{ c.bin_count }}x {{ c.bin_type.replace('_',' ') if c.bin_type else '' }} · {{ c.fill_level }} fill</div>
+          {% endif %}
+          {% if c.remarks %}<div style="font-size:11px;color:var(--text-muted);">{{ c.remarks }}</div>{% endif %}
+        </div>
+        <div class="collection-date">{{ c.collected_at[:10] }}</div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state"><p>No collection history yet.</p></div>
+    {% endif %}
+  </div>
+
+</div>
+
+<!-- NOTIFICATIONS + REPORT FORM -->
+<div class="grid-2 mb-24">
+
+  <div class="card">
+    <div class="card-header">
+      <div class="card-title">🔔 Notifications</div>
+      <span class="badge badge-green">{{ notifs|length }}</span>
+    </div>
+    {% if notifs %}
+      {% for n in notifs %}
+      <div style="padding:10px 0;border-bottom:1px solid var(--border);">
+        <div style="font-size:13px;">{{ n.message }}</div>
+        <div style="font-size:11px;color:var(--text-muted);">{{ n.sent_at[:16] }}</div>
+      </div>
+      {% endfor %}
+    {% else %}
+      <div class="empty-state"><p>No notifications yet</p></div>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <div class="card-header"><div class="card-title">📢 Submit a Report</div></div>
+    <form method="POST" action="/resident/report">
+      <div class="form-group"><label class="form-label">Issue Type</label>
+        <select name="issue_type" class="form-control">
+          <option value="missed pickup">Missed Pickup</option>
+          <option value="overflow">Bin Overflow</option>
+          <option value="wrong schedule">Wrong Schedule</option>
+          <option value="other">Other</option>
+        </select>
+      </div>
+      <div class="form-group"><label class="form-label">Description</label>
+        <textarea name="description" class="form-control" rows="3" placeholder="Describe the issue..." required></textarea>
+      </div>
+      <button type="submit" class="btn btn-primary" style="width:100%;">Submit Report</button>
+    </form>
+
+    {% if my_reports %}
+    <div style="margin-top:16px;border-top:1px solid var(--border);padding-top:14px;">
+      <div style="font-size:12px;font-weight:700;color:var(--text-muted);margin-bottom:8px;text-transform:uppercase;">My Reports</div>
+      {% for r in my_reports %}
+      <div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--border);">
+        <div style="font-size:12px;"><strong>{{ r.issue_type }}</strong><br><span style="color:var(--text-muted);">{{ r.created_at[:10] }}</span></div>
+        <span class="badge {% if r.status=='open' %}badge-red{% else %}badge-green{% endif %}">{{ r.status }}</span>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+
+</div>
+
 </div></div>
 """ + JS_SIDEBAR + """</body></html>"""
 
