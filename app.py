@@ -474,7 +474,7 @@ def register():
     conn = get_db()
     zones = conn.execute("SELECT zone_name FROM zones").fetchall()
     conn.close()
-    return render_template_string(REGISTER_HTML, errors=errors, success=success, zones=zones, form_data=form_data))
+    return render_template_string(REGISTER_HTML, errors=errors, success=success, zones=zones, form_data=form_data)
 
 @app.route('/forgot-password', methods=['GET','POST'])
 def forgot_password():
