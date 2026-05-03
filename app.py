@@ -11,27 +11,12 @@ import os
 import random
 import re
 import math
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 from functools import wraps
 
 app = Flask(__name__)
 app.secret_key = 'barangay_waste_secret_2024'
 DATABASE = 'barangay_waste.db'
-
-# ═══════════════════════════════════════════════════
-# EMAIL CONFIGURATION - CHANGE THESE!
-# ═══════════════════════════════════════════════════
-EMAIL_ENABLED = True
-GMAIL_USER = "justinxxjeffjacob@gmail.com"
-GMAIL_APP_PASSWORD = "vgpd phsx ipzp ckds"
-
-# ═══════════════════════════════════════════════════
-# WEBSITE URL - CHANGE THIS when deployed!
-# ═══════════════════════════════════════════════════
-WEBSITE_URL = "http://127.0.0.1:5000"
 
 def get_db():
     conn = sqlite3.connect(DATABASE)
@@ -43,68 +28,6 @@ def hash_password(password):
 
 def generate_code():
     return str(random.randint(100000, 999999))
-
-def send_email(to_email, subject, html_body):
-    if not EMAIL_ENABLED:
-        print(f"\n📧 [SIMULATED EMAIL]")
-        print(f"   To: {to_email}")
-        print(f"   Subject: {subject}")
-        print(f"   Body: {html_body[:200]}...\n")
-        return True
-    try:
-        msg = MIMEMultipart()
-        msg['From'] = GMAIL_USER
-        msg['To'] = to_email
-        msg['Subject'] = subject
-        msg.attach(MIMEText(html_body, 'html'))
-        with smtplib.SMTP('smtp.gmail.com', 587) as server:
-            server.starttls()
-            server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-            server.send_message(msg)
-        print(f"✅ Email sent to {to_email}")
-        return True
-    except Exception as e:
-        print(f"❌ Email error: {e}")
-        return False
-
-def send_verification_email(to_email, name, code):
-    subject = "EcoTrack - Verify Your Email Address"
-    body = f"""
-    <div style="font-family:sans-serif;max-width:500px;margin:auto;padding:20px;border:1px solid #e2e8f0;border-radius:12px;">
-        <h2 style="color:#16a34a;">♻️ EcoTrack</h2>
-        <h3>Welcome, {name}!</h3>
-        <p>Thank you for registering with EcoTrack. Please use the verification code below to activate your account:</p>
-        <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:20px;text-align:center;margin:20px 0;">
-            <span style="font-size:32px;font-weight:800;letter-spacing:8px;color:#15803d;">{code}</span>
-        </div>
-        <p>This code will expire in 30 minutes.</p>
-        <p>If you did not create this account, please ignore this email.</p>
-        <hr style="border:1px solid #e2e8f0;margin:20px 0;">
-        <p style="color:#64748b;font-size:12px;">EcoTrack - Smart Barangay Waste Collection System</p>
-    </div>
-    """
-    return send_email(to_email, subject, body)
-
-def send_reset_email(to_email, name, token):
-    reset_link = f"{WEBSITE_URL}/reset-password/{token}"
-    subject = "EcoTrack - Reset Your Password"
-    body = f"""
-    <div style="font-family:sans-serif;max-width:500px;margin:auto;padding:20px;border:1px solid #e2e8f0;border-radius:12px;">
-        <h2 style="color:#16a34a;">♻️ EcoTrack</h2>
-        <h3>Password Reset Request</h3>
-        <p>Hello {name},</p>
-        <p>We received a request to reset your password. Click the button below to create a new password:</p>
-        <div style="text-align:center;margin:20px 0;">
-            <a href="{reset_link}" style="background:#16a34a;color:white;padding:12px 24px;text-decoration:none;border-radius:8px;font-weight:600;">Reset Password</a>
-        </div>
-        <p>Or copy this link: <br><small style="color:#64748b;">{reset_link}</small></p>
-        <p>This link will expire in 30 minutes.</p>
-        <p>If you did not request this, please ignore this email.</p>
-        <hr style="border:1px solid #e2e8f0;margin:20px 0;">
-        <p style="color:#64748b;font-size:12px;">EcoTrack - Smart Barangay Waste Collection System</p>
-    </div>
-    """
-    return send_email(to_email, subject, body)
 
 def is_valid_name(name):
     if not name or len(name.strip()) < 3:
@@ -423,7 +346,7 @@ def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if 'user_id' not in session:
-            return redirect(url_for('login'))
+            return redirect('/login')
         return f(*args, **kwargs)
     return decorated
 
@@ -432,7 +355,7 @@ def role_required(*roles):
         @wraps(f)
         def decorated(*args, **kwargs):
             if 'role' not in session or session['role'] not in roles:
-                return redirect(url_for('dashboard'))
+                return redirect('/dashboard')
             return f(*args, **kwargs)
         return decorated
     return decorator
@@ -478,8 +401,8 @@ def run_ml_prediction():
 
 @app.route('/')
 def index():
-    if 'user_id' in session: return redirect(url_for('dashboard'))
-    return redirect(url_for('login'))
+    if 'user_id' in session: return redirect('/dashboard')
+    return redirect('/login')
 
 @app.route('/login', methods=['GET','POST'])
 def login():
@@ -499,15 +422,12 @@ def login():
             user = conn.execute("SELECT * FROM users WHERE email=? AND password=?", (email, hash_password(password))).fetchone()
             conn.close()
             if user:
-                if user['is_verified'] == 0:
-                    error = 'Please verify your email address first. Check your inbox for the verification code.'
-                else:
-                    session.clear()
-                    session['user_id'] = user['user_id']
-                    session['name'] = user['name']
-                    session['role'] = user['role']
-                    session['email'] = user['email']
-                    return redirect(url_for('dashboard'))
+                session.clear()
+                session['user_id'] = user['user_id']
+                session['name'] = user['name']
+                session['role'] = user['role']
+                session['email'] = user['email']
+                return redirect('/dashboard')
             else:
                 error = 'No account found with those credentials. Please check your email and password.'
     return render_template_string(LOGIN_HTML, error=error, success=success)
@@ -515,7 +435,7 @@ def login():
 @app.route('/logout')
 def logout():
     session.clear()
-    return redirect(url_for('login'))
+    return redirect('/login')
 
 @app.route('/register', methods=['GET','POST'])
 def register():
@@ -539,15 +459,13 @@ def register():
                 errors.append('That email address is already registered. Please use a different email or login.')
             else:
                 try:
-                    verification_code = generate_code()
-                    uid = conn.execute("INSERT INTO users (name,email,password,role,contact_number,verification_code,is_verified) VALUES (?,?,?,?,?,?,?)",
-                                       (name, email, hash_password(password), 'resident', contact, verification_code, 0)).lastrowid
+                    uid = conn.execute("INSERT INTO users (name,email,password,role,contact_number,is_verified) VALUES (?,?,?,?,?,?)",
+                                       (name, email, hash_password(password), 'resident', contact, 1)).lastrowid
                     conn.execute("INSERT INTO households (user_id,address,barangay_zone,latitude,longitude) VALUES (?,?,?,?,?)",
                                  (uid, address, zone, 7.0707+random.uniform(-0.01,0.01), 125.6087+random.uniform(-0.01,0.01)))
                     conn.commit()
                     conn.close()
-                    send_verification_email(email, name, verification_code)
-                    return redirect(url_for('verify_email', email=email))
+                    return redirect('/login?success=Registration successful! You can now login.')
                 except Exception as e:
                     errors.append('An error occurred. Please try again.')
                 finally:
@@ -557,26 +475,6 @@ def register():
     zones = conn.execute("SELECT zone_name FROM zones").fetchall()
     conn.close()
     return render_template_string(REGISTER_HTML, errors=errors, success=success, zones=zones, form_data=form_data)
-
-@app.route('/verify-email', methods=['GET','POST'])
-def verify_email():
-    error = None
-    success = None
-    prefill_email = request.args.get('email','')
-    if request.method == 'POST':
-        email = request.form.get('email','').strip()
-        code = request.form.get('code','').strip()
-        conn = get_db()
-        user = conn.execute("SELECT * FROM users WHERE email=? AND verification_code=? AND is_verified=0", (email, code)).fetchone()
-        if user:
-            conn.execute("UPDATE users SET is_verified=1, verification_code=NULL WHERE user_id=?", (user['user_id'],))
-            conn.commit()
-            conn.close()
-            return redirect(url_for('login', success='Email verified! You can now login.'))
-        else:
-            error = 'Invalid email or verification code.'
-            conn.close()
-    return render_template_string(VERIFY_HTML, error=error, success=success, prefill_email=prefill_email)
 
 @app.route('/forgot-password', methods=['GET','POST'])
 def forgot_password():
@@ -594,9 +492,9 @@ def forgot_password():
                 expiry = (datetime.now() + timedelta(minutes=30)).strftime('%Y-%m-%d %H:%M:%S')
                 conn.execute("UPDATE users SET reset_token=?, reset_token_expiry=? WHERE user_id=?", (token, expiry, user['user_id']))
                 conn.commit()
-                send_reset_email(email, user['name'], token)
                 conn.close()
-                success = 'Password reset link has been sent to your email. Please check your inbox.'
+                success = 'Password reset link has been generated. Check console for the link.'
+                print(f"\n🔑 PASSWORD RESET LINK: http://127.0.0.1:5000/reset-password/{token}\n")
             else:
                 error = 'No account found with that email address.'
                 conn.close()
@@ -622,16 +520,19 @@ def reset_password(token):
             conn.execute("UPDATE users SET password=?, reset_token=NULL, reset_token_expiry=NULL WHERE user_id=?", (hash_password(password), user['user_id']))
             conn.commit()
             conn.close()
-            return redirect(url_for('login', success='Password reset successful! You can now login with your new password.'))
+            return redirect('/login?success=Password reset successful! You can now login with your new password.')
     conn.close()
     return render_template_string(RESET_HTML, error=error, success=success, token=token)
 
 @app.route('/dashboard')
 @login_required
 def dashboard():
-    if session['role'] == 'admin': return redirect(url_for('admin_dashboard'))
-    elif session['role'] == 'collector': return redirect(url_for('collector_dashboard'))
-    else: return redirect(url_for('resident_dashboard'))
+    if session['role'] == 'admin':
+        return redirect('/admin')
+    elif session['role'] == 'collector':
+        return redirect('/collector')
+    else:
+        return redirect('/resident')
 
 @app.route('/admin')
 @login_required
@@ -807,7 +708,7 @@ def resolve_report(rid):
     conn.execute("UPDATE reports SET status='resolved' WHERE report_id=?", (rid,))
     conn.commit()
     conn.close()
-    return redirect(url_for('admin_reports'))
+    return redirect('/admin/reports')
 
 @app.route('/admin/analytics')
 @login_required
@@ -868,7 +769,7 @@ def log_collection():
     conn.execute("INSERT INTO waste_data (zone_id,date,waste_volume,collection_status,bin_count,bin_type,fill_level) VALUES (?,?,?,?,?,?,?)", (zone_id, datetime.now().strftime('%Y-%m-%d'), ev, status, bc, bt, fl))
     conn.commit()
     conn.close()
-    return redirect(url_for('collector_dashboard'))
+    return redirect('/collector')
 
 @app.route('/resident')
 @login_required
@@ -900,7 +801,7 @@ def submit_report():
     conn.execute("INSERT INTO notifications (user_id,message,type,status,sent_at) VALUES (?,?,?,?,?)", (session['user_id'], f"Your report '{request.form['issue_type']}' has been received.", 'web', 'sent', datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
     conn.commit()
     conn.close()
-    return redirect(url_for('resident_dashboard'))
+    return redirect('/resident')
 
 @app.route('/api/run-ml', methods=['POST'])
 @login_required
@@ -965,11 +866,9 @@ LOGIN_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="vie
 
 REGISTER_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>EcoTrack - Register</title>""" + BASE_STYLE + """<style>.reg-page{min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#f0fdf4,#dcfce7);padding:24px}.reg-card{background:#fff;border-radius:20px;padding:40px;width:100%;max-width:520px;box-shadow:0 20px 60px rgba(0,0,0,.08);animation:fadeUp .5s}.reg-header{text-align:center;margin-bottom:28px}.reg-header h2{font-size:20px;font-weight:800}.reg-header p{font-size:13px;color:var(--text-muted)}.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}@media(max-width:480px){.form-grid{grid-template-columns:1fr}}.btn-register{width:100%;padding:12px;font-size:14px;font-weight:700;background:linear-gradient(135deg,var(--green-500),var(--green-700));color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-family:inherit;margin-top:8px;box-shadow:0 4px 12px rgba(34,197,94,.3)}.btn-register:hover{opacity:.9}</style></head><body><div class="reg-page"><div class="reg-card"><div class="reg-header"><div style="font-size:32px;margin-bottom:8px;">♻️</div><h2>Create Resident Account</h2><p>Register your household to receive collection notifications</p></div>{% if errors %}<div class="alert alert-danger"><strong>Please fix the following:</strong><ul>{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul></div>{% endif %}{% if success %}<div class="alert alert-success">{{ success }}</div>{% else %}<form method="POST" autocomplete="off"><div class="form-grid"><div class="form-group"><label class="form-label">Full Name *</label><input type="text" name="name" class="form-control" placeholder="Juan dela Cruz" value="{{ form_data.get('name','') }}" required autocomplete="off"></div><div class="form-group"><label class="form-label">Email *</label><input type="text" name="email" class="form-control" placeholder="you@email.com" value="{{ form_data.get('email','') }}" required autocomplete="off"></div><div class="form-group"><label class="form-label">Password *</label><input type="password" name="password" class="form-control" placeholder="Min. 6 characters" required autocomplete="new-password"></div><div class="form-group"><label class="form-label">Confirm Password *</label><input type="password" name="confirm_password" class="form-control" placeholder="Re-enter password" required autocomplete="new-password"></div></div><div class="form-group"><label class="form-label">Contact Number</label><input type="text" name="contact" class="form-control" placeholder="09XXXXXXXXX" value="{{ form_data.get('contact','') }}" autocomplete="off"></div><div class="form-group"><label class="form-label">Home Address</label><input type="text" name="address" class="form-control" placeholder="123 Rizal St, Brgy. San Pedro" value="{{ form_data.get('address','') }}" autocomplete="off"></div><div class="form-group"><label class="form-label">Barangay Zone</label><select name="zone" class="form-control"><option value="">-- Select your zone --</option>{% for z in zones %}<option value="{{ z.zone_name }}" {% if form_data.get('zone')==z.zone_name %}selected{% endif %}>{{ z.zone_name }}</option>{% endfor %}</select></div><button type="submit" class="btn-register">Create Account</button></form>{% endif %}<div style="text-align:center;margin-top:16px;font-size:13px;color:var(--text-muted);">Already have an account? <a href="/login" style="color:var(--green-600);font-weight:600;">Sign in</a></div></div></div></body></html>"""
 
-FORGOT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Forgot Password - EcoTrack</title>""" + BASE_STYLE + """<style>.auth-page{min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#f0fdf4,#dcfce7);padding:24px}.auth-card{background:#fff;border-radius:20px;padding:40px;width:100%;max-width:440px;box-shadow:0 20px 60px rgba(0,0,0,.08);animation:fadeUp .5s}.auth-card h2{font-size:18px;font-weight:800;margin-bottom:8px}.auth-card p{font-size:13px;color:var(--text-muted);margin-bottom:24px}.btn-auth{width:100%;padding:12px;font-size:14px;font-weight:700;background:linear-gradient(135deg,var(--green-500),var(--green-700));color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-family:inherit;box-shadow:0 4px 12px rgba(34,197,94,.3)}</style></head><body><div class="auth-page"><div class="auth-card"><div style="text-align:center;font-size:32px;margin-bottom:16px;">🔑</div><h2>Forgot Password?</h2><p>Enter your email address and we'll send you a password reset link.</p>{% if error %}<div class="alert alert-danger">{{ error }}</div>{% endif %}{% if success %}<div class="alert alert-success">{{ success }} <br><a href="/login" style="color:var(--green-700);font-weight:600;">Back to Login</a></div>{% else %}<form method="POST"><div class="form-group"><label class="form-label">Email Address</label><input type="text" name="email" class="form-control" placeholder="you@email.com" required></div><button type="submit" class="btn-auth">Send Reset Link</button></form>{% endif %}<div style="text-align:center;margin-top:16px;font-size:13px;"><a href="/login" style="color:var(--green-600);font-weight:600;">Back to Login</a></div></div></div></body></html>"""
+FORGOT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Forgot Password - EcoTrack</title>""" + BASE_STYLE + """<style>.auth-page{min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#f0fdf4,#dcfce7);padding:24px}.auth-card{background:#fff;border-radius:20px;padding:40px;width:100%;max-width:440px;box-shadow:0 20px 60px rgba(0,0,0,.08);animation:fadeUp .5s}.auth-card h2{font-size:18px;font-weight:800;margin-bottom:8px}.auth-card p{font-size:13px;color:var(--text-muted);margin-bottom:24px}.btn-auth{width:100%;padding:12px;font-size:14px;font-weight:700;background:linear-gradient(135deg,var(--green-500),var(--green-700));color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-family:inherit;box-shadow:0 4px 12px rgba(34,197,94,.3)}</style></head><body><div class="auth-page"><div class="auth-card"><div style="text-align:center;font-size:32px;margin-bottom:16px;">🔑</div><h2>Forgot Password?</h2><p>Enter your email address and we'll generate a password reset link for you.</p>{% if error %}<div class="alert alert-danger">{{ error }}</div>{% endif %}{% if success %}<div class="alert alert-success">{{ success }} <br><a href="/login" style="color:var(--green-700);font-weight:600;">Back to Login</a></div>{% else %}<form method="POST"><div class="form-group"><label class="form-label">Email Address</label><input type="text" name="email" class="form-control" placeholder="you@email.com" required></div><button type="submit" class="btn-auth">Generate Reset Link</button></form>{% endif %}<div style="text-align:center;margin-top:16px;font-size:13px;"><a href="/login" style="color:var(--green-600);font-weight:600;">Back to Login</a></div></div></div></body></html>"""
 
 RESET_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Reset Password - EcoTrack</title>""" + BASE_STYLE + """<style>.auth-page{min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#f0fdf4,#dcfce7);padding:24px}.auth-card{background:#fff;border-radius:20px;padding:40px;width:100%;max-width:440px;box-shadow:0 20px 60px rgba(0,0,0,.08);animation:fadeUp .5s}.auth-card h2{font-size:18px;font-weight:800;margin-bottom:8px}.auth-card p{font-size:13px;color:var(--text-muted);margin-bottom:24px}.btn-auth{width:100%;padding:12px;font-size:14px;font-weight:700;background:linear-gradient(135deg,var(--green-500),var(--green-700));color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-family:inherit;box-shadow:0 4px 12px rgba(34,197,94,.3)}</style></head><body><div class="auth-page"><div class="auth-card"><div style="text-align:center;font-size:32px;margin-bottom:16px;">🔒</div><h2>Reset Password</h2><p>Enter your new password below.</p>{% if error %}<div class="alert alert-danger">{{ error }}</div>{% endif %}{% if success %}<div class="alert alert-success">{{ success }}</div>{% endif %}{% if token %}<form method="POST"><div class="form-group"><label class="form-label">New Password</label><input type="password" name="password" class="form-control" placeholder="Min. 6 characters" required></div><div class="form-group"><label class="form-label">Confirm Password</label><input type="password" name="confirm_password" class="form-control" placeholder="Re-enter password" required></div><button type="submit" class="btn-auth">Reset Password</button></form>{% endif %}<div style="text-align:center;margin-top:16px;font-size:13px;"><a href="/login" style="color:var(--green-600);font-weight:600;">Back to Login</a></div></div></div></body></html>"""
-
-VERIFY_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Verify Email - EcoTrack</title>""" + BASE_STYLE + """<style>.auth-page{min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#f0fdf4,#dcfce7);padding:24px}.auth-card{background:#fff;border-radius:20px;padding:40px;width:100%;max-width:440px;box-shadow:0 20px 60px rgba(0,0,0,.08);animation:fadeUp .5s}.auth-card h2{font-size:18px;font-weight:800;margin-bottom:8px}.auth-card p{font-size:13px;color:var(--text-muted);margin-bottom:24px}.btn-auth{width:100%;padding:12px;font-size:14px;font-weight:700;background:linear-gradient(135deg,var(--green-500),var(--green-700));color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-family:inherit;box-shadow:0 4px 12px rgba(34,197,94,.3)}.code-input{font-size:24px;font-weight:700;text-align:center;letter-spacing:8px}</style></head><body><div class="auth-page"><div class="auth-card"><div style="text-align:center;font-size:32px;margin-bottom:16px;">📧</div><h2>Verify Your Email</h2><p>We sent a 6-digit verification code to your email. Enter it below to activate your account.</p>{% if error %}<div class="alert alert-danger">{{ error }}</div>{% endif %}<form method="POST"><div class="form-group"><label class="form-label">Email Address</label><input type="text" name="email" class="form-control" placeholder="you@email.com" value="{{ prefill_email }}" required></div><div class="form-group"><label class="form-label">Verification Code</label><input type="text" name="code" class="form-control code-input" placeholder="000000" required maxlength="6"></div><button type="submit" class="btn-auth">Verify Email</button></form><div style="text-align:center;margin-top:16px;font-size:13px;"><a href="/login" style="color:var(--green-600);font-weight:600;">Back to Login</a></div><div style="text-align:center;margin-top:12px;font-size:12px;color:var(--text-muted);">Didn't receive the code? Check your spam folder or <a href="/register" style="color:var(--green-600);">register again</a>.</div></div></div></body></html>"""
 
 SCHEDULES_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Schedules - EcoTrack</title>""" + BASE_STYLE + """</head><body>""" + MOBILE_HEADER + SIDEBAR_ADMIN + """<div class="main-content"><div class="topbar"><div class="topbar-title">📅 Collection Schedules</div><button class="btn btn-primary btn-sm" onclick="document.getElementById('addModal').classList.add('open')">+ Add Schedule</button></div><div class="page-content">{% if error %}<div class="alert alert-danger">{{ error }}</div>{% endif %}<div class="card"><div class="card-header"><div class="card-title">All Schedules</div><span class="badge badge-blue">{{ schedules|length }} total</span></div><table><thead><tr><th>Zone</th><th>Day</th><th>Time</th><th>Status</th><th>Actions</th></tr></thead><tbody>{% for s in schedules %}<tr><td><strong>{{ s.zone_name }}</strong></td><td>{{ s.collection_day }}</td><td>{{ s.collection_time }}</td><td><span class="badge {% if s.status=='active' %}badge-green{% else %}badge-gray{% endif %}">{{ s.status }}</span></td><td style="display:flex;gap:6px;"><form method="POST" style="display:inline;"><input type="hidden" name="action" value="toggle"><input type="hidden" name="schedule_id" value="{{ s.schedule_id }}"><button class="btn btn-secondary btn-sm">Toggle</button></form><form method="POST" style="display:inline;" onsubmit="return confirm('Delete?')"><input type="hidden" name="action" value="delete"><input type="hidden" name="schedule_id" value="{{ s.schedule_id }}"><button class="btn btn-danger btn-sm">Delete</button></form></td></tr>{% endfor %}</tbody></table></div></div></div><div class="modal-backdrop" id="addModal"><div class="modal"><div class="modal-title">➕ Add Schedule</div><form method="POST"><input type="hidden" name="action" value="add"><div class="form-group"><label class="form-label">Zone</label><select name="zone_id" class="form-control">{% for z in zones %}<option value="{{ z.zone_id }}">{{ z.zone_name }}</option>{% endfor %}</select></div><div class="form-group"><label class="form-label">Day</label><select name="collection_day" class="form-control">{% for day in ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'] %}<option>{{ day }}</option>{% endfor %}</select></div><div class="form-group"><label class="form-label">Time</label><input type="time" name="collection_time" class="form-control" value="07:00"></div><div class="modal-footer"><button type="button" class="btn btn-ghost" onclick="document.getElementById('addModal').classList.remove('open')">Cancel</button><button type="submit" class="btn btn-primary">Add Schedule</button></div></form></div></div>""" + JS_SIDEBAR + """</body></html>"""
 
