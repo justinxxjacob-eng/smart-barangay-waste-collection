@@ -457,6 +457,7 @@ def register():
             existing = conn.execute("SELECT user_id FROM users WHERE email=?", (email,)).fetchone()
             if existing:
                 errors.append('That email address is already registered. Please use a different email or login.')
+                conn.close()
             else:
                 try:
                     uid = conn.execute("INSERT INTO users (name,email,password,role,contact_number,is_verified) VALUES (?,?,?,?,?,?)",
@@ -467,14 +468,13 @@ def register():
                     conn.close()
                     return redirect('/login?success=Registration successful! You can now login.')
                 except Exception as e:
-                    errors.append('An error occurred. Please try again.')
-                finally:
+                    errors.append(f'An error occurred: {str(e)}')
                     try: conn.close()
                     except: pass
     conn = get_db()
     zones = conn.execute("SELECT zone_name FROM zones").fetchall()
     conn.close()
-    return render_template_string(REGISTER_HTML, errors=errors, success=success, zones=zones, form_data=form_data)
+    return render_template_string(REGISTER_HTML, errors=errors, success=success, zones=zones, form_data=form_data))
 
 @app.route('/forgot-password', methods=['GET','POST'])
 def forgot_password():
