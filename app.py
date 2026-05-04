@@ -113,6 +113,7 @@ def estimate_waste_volume(bin_count, bin_type, fill_level):
     return round(estimated_kg, 1)
 
 def init_db():
+    # DELETE old database to ensure fresh tables with all columns
     if os.path.exists(DATABASE):
         os.remove(DATABASE)
     
@@ -468,7 +469,7 @@ def register():
                     conn.close()
                     return redirect('/login?success=Registration successful! You can now login.')
                 except Exception as e:
-                    errors.append(f'An error occurred: {str(e)}')
+                    errors.append(f'Error: {str(e)}')
                     try: conn.close()
                     except: pass
     conn = get_db()
@@ -558,11 +559,8 @@ def admin_dashboard():
         td.append({'date':d,'volume':round(vol,1)})
     zp = conn.execute("SELECT z.zone_name, SUM(CASE WHEN cl.status='collected' THEN 1 ELSE 0 END) as collected, SUM(CASE WHEN cl.status='missed' THEN 1 ELSE 0 END) as missed, SUM(CASE WHEN cl.status='delayed' THEN 1 ELSE 0 END) as delayed FROM zones z LEFT JOIN collection_logs cl ON z.zone_id=cl.zone_id GROUP BY z.zone_id").fetchall()
     
-    # FIXED: Newest residents get the LATEST collection logs with volume + containers
     zone_residents = []
-    status_options = ['collected', 'missed', 'delayed']
     for z in zones:
-        # ORDER BY u.user_id DESC - newest registered users FIRST!
         residents = conn.execute("""
             SELECT u.user_id, u.name, u.contact_number, h.address
             FROM users u JOIN households h ON u.user_id = h.user_id
@@ -571,7 +569,6 @@ def admin_dashboard():
         """, (z['zone_name'],)).fetchall()
         
         if residents:
-            # Get latest logs first (newest first) with volume data
             zone_logs = conn.execute("""
                 SELECT cl.status, cl.collected_at, cl.bin_count, cl.bin_type, cl.fill_level,
                        wd.waste_volume
@@ -648,7 +645,6 @@ def manage_schedules():
             collection_day = request.form.get('collection_day')
             collection_time = request.form.get('collection_time')
             
-            # CHECK FOR DUPLICATE SCHEDULE
             existing = conn.execute("""
                 SELECT * FROM collection_schedules 
                 WHERE zone_id=? AND collection_day=? AND collection_time=?
